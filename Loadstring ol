@@ -1,0 +1,666 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+local StarterPlayer = game:GetService("StarterPlayer")
+local Workspace = game:GetService("Workspace")
+
+local remotesFolder = ReplicatedStorage:FindFirstChild("FreemiumV5Remotes")
+if not remotesFolder then
+	remotesFolder = Instance.new("Folder")
+	remotesFolder.Name = "FreemiumV5Remotes"
+	remotesFolder.Parent = ReplicatedStorage
+end
+
+local updateMovementEvent = remotesFolder:FindFirstChild("UpdateMovementEvent")
+if not updateMovementEvent then
+	updateMovementEvent = Instance.new("RemoteEvent")
+	updateMovementEvent.Name = "UpdateMovementEvent"
+	updateMovementEvent.Parent = remotesFolder
+end
+
+local serverScriptName = "FreemiumV5Server"
+local oldServer = ServerScriptService:FindFirstChild(serverScriptName)
+if oldServer then
+	oldServer:Destroy()
+end
+
+local serverScript = Instance.new("Script")
+serverScript.Name = serverScriptName
+serverScript.Source = [[
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local remotes = ReplicatedStorage:WaitForChild("FreemiumV5Remotes")
+local event = remotes:WaitForChild("UpdateMovementEvent")
+
+local states = {}
+
+local function getState(player)
+	if not states[player] then
+		states[player] = {
+			speedEnabled = false,
+			speedValue = 57,
+			jumpEnabled = false,
+			jumpValue = 69,
+			spinEnabled = false,
+			spinValue = 12,
+		}
+	end
+	return states[player]
+end
+
+local function clearSpin(character)
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+	local av = root:FindFirstChild("FreemiumSpinAV")
+	if av then av:Destroy() end
+	local att = root:FindFirstChild("FreemiumSpinAtt")
+	if att then att:Destroy() end
+end
+
+local function applyCharacter(player, character)
+	local st = getState(player)
+	local hum = character:WaitForChild("Humanoid", 10)
+	local root = character:WaitForChild("HumanoidRootPart", 10)
+	if not hum or not root then return end
+
+	hum.WalkSpeed = st.speedEnabled and math.clamp(st.speedValue, 0, 250) or 16
+	hum.UseJumpPower = true
+	hum.JumpPower = st.jumpEnabled and math.clamp(st.jumpValue, 0, 300) or 50
+
+	clearSpin(character)
+	if st.spinEnabled then
+		local att = Instance.new("Attachment")
+		att.Name = "FreemiumSpinAtt"
+		att.Parent = root
+
+		local av = Instance.new("AngularVelocity")
+		av.Name = "FreemiumSpinAV"
+		av.Attachment0 = att
+		av.MaxTorque = 1e6
+		av.AngularVelocity = Vector3.new(0, math.clamp(st.spinValue, 0, 120), 0)
+		av.RelativeTo = Enum.ActuatorRelativeTo.World
+		av.Parent = root
+	end
+end
+
+event.OnServerEvent:Connect(function(player, data)
+	if typeof(data) ~= "table" then return end
+	local st = getState(player)
+	if typeof(data.speedEnabled) == "boolean" then st.speedEnabled = data.speedEnabled end
+	if typeof(data.speedValue) == "number" then st.speedValue = math.clamp(data.speedValue, 1, 250) end
+	if typeof(data.jumpEnabled) == "boolean" then st.jumpEnabled = data.jumpEnabled end
+	if typeof(data.jumpValue) == "number" then st.jumpValue = math.clamp(data.jumpValue, 1, 300) end
+	if typeof(data.spinEnabled) == "boolean" then st.spinEnabled = data.spinEnabled end
+	if typeof(data.spinValue) == "number" then st.spinValue = math.clamp(data.spinValue, 0, 120) end
+
+	if player.Character then
+		applyCharacter(player, player.Character)
+	end
+end)
+
+Players.PlayerAdded:Connect(function(player)
+	getState(player)
+	player.CharacterAdded:Connect(function(char)
+		applyCharacter(player, char)
+	end)
+end)
+
+for _, player in ipairs(Players:GetPlayers()) do
+	getState(player)
+	if player.Character then
+		applyCharacter(player, player.Character)
+	end
+	player.CharacterAdded:Connect(function(char)
+		applyCharacter(player, char)
+	end)
+end
+
+Players.PlayerRemoving:Connect(function(player)
+	states[player] = nil
+end)
+]]
+serverScript.Parent = ServerScriptService
+
+local scriptsFolder = StarterPlayer:WaitForChild("StarterPlayerScripts")
+local clientScriptName = "FreemiumV5Client"
+local oldClient = scriptsFolder:FindFirstChild(clientScriptName)
+if oldClient then
+	oldClient:Destroy()
+end
+
+local clientScript = Instance.new("LocalScript")
+clientScript.Name = clientScriptName
+clientScript.Source = [[
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local camera = Workspace.CurrentCamera
+local event = ReplicatedStorage:WaitForChild("FreemiumV5Remotes"):WaitForChild("UpdateMovementEvent")
+
+local cfg = {
+	esp = false,
+	wallCheck = true,
+	aimbot = false,
+	fov = 120,
+	speedOn = false,
+	speed = 57,
+	jumpOn = false,
+	jump = 69,
+	spinOn = false,
+	spin = 12,
+}
+
+local function validPlayerChar(targetPlayer)
+	if not targetPlayer or targetPlayer == player then return false end
+	local m = targetPlayer.Character
+	if not m or not m:IsA("Model") then return false end
+	local hum = m:FindFirstChildOfClass("Humanoid")
+	local head = m:FindFirstChild("Head")
+	local root = m:FindFirstChild("HumanoidRootPart")
+	return hum and head and root and head:IsA("BasePart") and root:IsA("BasePart") and hum.Health > 0
+end
+
+local function canSee(part, charModel)
+	local origin = camera.CFrame.Position
+	local dir = part.Position - origin
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local list = { charModel }
+	if player.Character then table.insert(list, player.Character) end
+	params.FilterDescendantsInstances = list
+	return Workspace:Raycast(origin, dir, params) == nil
+end
+
+local function pushMovement()
+	event:FireServer({
+		speedEnabled = cfg.speedOn,
+		speedValue = cfg.speed,
+		jumpEnabled = cfg.jumpOn,
+		jumpValue = cfg.jump,
+		spinEnabled = cfg.spinOn,
+		spinValue = cfg.spin,
+	})
+end
+
+local espMap = {}
+local espContainer = Instance.new("Folder")
+espContainer.Name = "FreemiumESP"
+espContainer.Parent = playerGui
+
+local boneLinks = {
+	{"Head", "UpperTorso"}, {"Head", "Torso"},
+	{"UpperTorso", "LowerTorso"},
+	{"UpperTorso", "LeftUpperArm"}, {"LeftUpperArm", "LeftLowerArm"}, {"LeftLowerArm", "LeftHand"},
+	{"UpperTorso", "RightUpperArm"}, {"RightUpperArm", "RightLowerArm"}, {"RightLowerArm", "RightHand"},
+	{"LowerTorso", "LeftUpperLeg"}, {"LeftUpperLeg", "LeftLowerLeg"}, {"LeftLowerLeg", "LeftFoot"},
+	{"LowerTorso", "RightUpperLeg"}, {"RightUpperLeg", "RightLowerLeg"}, {"RightLowerLeg", "RightFoot"},
+	{"Torso", "Left Arm"}, {"Torso", "Right Arm"}, {"Torso", "Left Leg"}, {"Torso", "Right Leg"},
+}
+
+local function clearESPForPlayer(p)
+	local item = espMap[p]
+	if not item then return end
+	for _, c in ipairs(item.conns) do c:Disconnect() end
+	if item.box then item.box:Destroy() end
+	for _, b in ipairs(item.bones) do b:Destroy() end
+	if item.tag then item.tag:Destroy() end
+	espMap[p] = nil
+end
+
+local function clearAllESP()
+	for p in pairs(espMap) do clearESPForPlayer(p) end
+end
+
+local function addESPForPlayer(p)
+	if espMap[p] or not validPlayerChar(p) then return end
+	local m = p.Character
+	local root = m:FindFirstChild("HumanoidRootPart")
+	local head = m:FindFirstChild("Head")
+	local hum = m:FindFirstChildOfClass("Humanoid")
+
+	local box = Instance.new("BoxHandleAdornment")
+	box.Adornee = root
+	box.Size = Vector3.new(4, 5.5, 2.5)
+	box.Color3 = Color3.fromRGB(255, 255, 255)
+	box.Transparency = 0.55
+	box.AlwaysOnTop = cfg.wallCheck
+	box.ZIndex = 5
+	box.Parent = espContainer
+
+	local bones = {}
+	for _, pair in ipairs(boneLinks) do
+		local p0, p1 = m:FindFirstChild(pair[1]), m:FindFirstChild(pair[2])
+		if p0 and p1 and p0:IsA("BasePart") and p1:IsA("BasePart") then
+			local bone = Instance.new("CylinderHandleAdornment")
+			bone.Adornee = Workspace.Terrain
+			bone.Color3 = Color3.fromRGB(168, 85, 247)
+			bone.Transparency = 0.15
+			bone.Radius = 0.06
+			bone.Height = 1
+			bone.AlwaysOnTop = cfg.wallCheck
+			bone.ZIndex = 6
+			bone.Parent = espContainer
+			table.insert(bones, bone)
+		end
+	end
+
+	local tag = Instance.new("BillboardGui")
+	tag.Adornee = head
+	tag.Size = UDim2.new(0, 130, 0, 26)
+	tag.StudsOffset = Vector3.new(0, 2.2, 0)
+	tag.AlwaysOnTop = cfg.wallCheck
+	tag.Parent = espContainer
+
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.new(1, 0, 1, 0)
+	lbl.BackgroundColor3 = Color3.fromRGB(15, 10, 25)
+	lbl.BackgroundTransparency = 0.35
+	lbl.TextColor3 = Color3.new(1, 1, 1)
+	lbl.Font = Enum.Font.GothamBold
+	lbl.TextSize = 12
+	lbl.Parent = tag
+	Instance.new("UICorner", lbl).CornerRadius = UDim.new(0, 6)
+
+	local conns = {
+		hum.Died:Connect(function() clearESPForPlayer(p) end),
+		p.CharacterRemoving:Connect(function() clearESPForPlayer(p) end),
+	}
+
+	espMap[p] = { char = m, box = box, bones = bones, tag = tag, lbl = lbl, conns = conns }
+end
+
+local function syncESPList()
+	if not cfg.esp then clearAllESP() return end
+	for _, p in ipairs(Players:GetPlayers()) do
+		if validPlayerChar(p) then
+			addESPForPlayer(p)
+		end
+	end
+end
+
+Players.PlayerAdded:Connect(function(p)
+	if p == player then return end
+	p.CharacterAdded:Connect(function()
+		task.wait(0.05)
+		if cfg.esp and validPlayerChar(p) then
+			addESPForPlayer(p)
+		end
+	end)
+end)
+
+for _, p in ipairs(Players:GetPlayers()) do
+	if p ~= player then
+		p.CharacterAdded:Connect(function()
+			task.wait(0.05)
+			if cfg.esp and validPlayerChar(p) then
+				addESPForPlayer(p)
+			end
+		end)
+	end
+end
+
+Players.PlayerRemoving:Connect(function(p)
+	clearESPForPlayer(p)
+end)
+
+local function stepESP()
+	if not cfg.esp then return end
+	syncESPList()
+	local camPos = camera.CFrame.Position
+	for p, item in pairs(espMap) do
+		if not validPlayerChar(p) or p.Character ~= item.char then
+			clearESPForPlayer(p)
+		else
+			local m = p.Character
+			local root = m:FindFirstChild("HumanoidRootPart")
+			local head = m:FindFirstChild("Head")
+			local vis = cfg.wallCheck or canSee(root, m)
+			item.box.Visible = vis
+			item.box.AlwaysOnTop = cfg.wallCheck
+			item.box.Adornee = root
+
+			local meters = math.floor((root.Position - camPos).Magnitude * 0.28 + 0.5)
+			item.lbl.Text = p.DisplayName .. " | " .. meters .. "m"
+			item.tag.Enabled = vis
+			item.tag.AlwaysOnTop = cfg.wallCheck
+			item.tag.Adornee = head
+
+			local idx = 1
+			for _, pair in ipairs(boneLinks) do
+				local p0, p1 = m:FindFirstChild(pair[1]), m:FindFirstChild(pair[2])
+				if p0 and p1 and p0:IsA("BasePart") and p1:IsA("BasePart") then
+					local bone = item.bones[idx]
+					if bone then
+						local a, b = p0.Position, p1.Position
+						local len = (b - a).Magnitude
+						if len > 0.02 then
+							bone.CFrame = CFrame.lookAt((a + b) * 0.5, b) * CFrame.Angles(math.pi / 2, 0, 0)
+							bone.Height = len
+							bone.Visible = vis
+							bone.AlwaysOnTop = cfg.wallCheck
+						else
+							bone.Visible = false
+						end
+						idx += 1
+					end
+				end
+			end
+		end
+	end
+end
+
+local function getTargetHead()
+	local cf = camera.CFrame
+	local bestPart, bestDist = nil, math.huge
+	local halfRad = math.rad(math.clamp(cfg.fov, 10, 360) * 0.5)
+	for _, p in ipairs(Players:GetPlayers()) do
+		if validPlayerChar(p) then
+			local m = p.Character
+			local head = m:FindFirstChild("Head")
+			local delta = head.Position - cf.Position
+			local dist = delta.Magnitude
+			if dist > 0.1 then
+				local ang = math.acos(math.clamp(cf.LookVector:Dot(delta.Unit), -1, 1))
+				if (cfg.fov >= 359.5 or ang <= halfRad) and canSee(head, m) and dist < bestDist then
+					bestDist = dist
+					bestPart = head
+				end
+			end
+		end
+	end
+	return bestPart
+end
+
+local function stepAimbot()
+	if not cfg.aimbot then return end
+	local head = getTargetHead()
+	if not head then return end
+	camera.CFrame = CFrame.lookAt(camera.CFrame.Position, head.Position)
+end
+
+if playerGui:FindFirstChild("FreemiumV5UI") then
+	playerGui.FreemiumV5UI:Destroy()
+end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "FreemiumV5UI"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.Parent = playerGui
+
+local scale = Instance.new("UIScale")
+scale.Parent = gui
+local function refreshScale()
+	local vp = camera.ViewportSize
+	scale.Scale = math.clamp(math.min(vp.X, vp.Y) / 430, 0.85, 1.2)
+end
+refreshScale()
+camera:GetPropertyChangedSignal("ViewportSize"):Connect(refreshScale)
+
+local reopen = Instance.new("TextButton")
+reopen.Size = UDim2.new(0, 132, 0, 42)
+reopen.Position = UDim2.new(0, 14, 0.5, -21)
+reopen.BackgroundColor3 = Color3.fromRGB(22, 12, 36)
+reopen.TextColor3 = Color3.fromRGB(216, 180, 254)
+reopen.Font = Enum.Font.GothamBlack
+reopen.TextSize = 14
+reopen.Text = "FREEMIUM"
+reopen.Visible = false
+reopen.Parent = gui
+Instance.new("UICorner", reopen).CornerRadius = UDim.new(0, 10)
+local rStroke = Instance.new("UIStroke", reopen)
+rStroke.Color = Color3.fromRGB(147, 51, 234)
+rStroke.Thickness = 1.5
+
+local panel = Instance.new("Frame")
+panel.Size = UDim2.new(0, 336, 0, 510)
+panel.Position = UDim2.new(0.5, -168, 0.5, -255)
+panel.BackgroundColor3 = Color3.fromRGB(12, 10, 18)
+panel.Active = true
+panel.Parent = gui
+Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 14)
+local pStroke = Instance.new("UIStroke", panel)
+pStroke.Color = Color3.fromRGB(126, 34, 206)
+pStroke.Thickness = 1.8
+
+local top = Instance.new("Frame")
+top.Size = UDim2.new(1, 0, 0, 46)
+top.BackgroundColor3 = Color3.fromRGB(26, 14, 44)
+top.Active = true
+top.Parent = panel
+Instance.new("UICorner", top).CornerRadius = UDim.new(0, 14)
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -100, 1, 0)
+title.Position = UDim2.new(0, 14, 0, 0)
+title.BackgroundTransparency = 1
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Font = Enum.Font.GothamBlack
+title.TextSize = 16
+title.TextColor3 = Color3.fromRGB(216, 180, 254)
+title.Text = "FREEMIUM"
+title.Parent = top
+
+local minBtn = Instance.new("TextButton")
+minBtn.Size = UDim2.new(0, 34, 0, 34)
+minBtn.Position = UDim2.new(1, -78, 0.5, -17)
+minBtn.BackgroundColor3 = Color3.fromRGB(50, 25, 80)
+minBtn.TextColor3 = Color3.new(1, 1, 1)
+minBtn.Font = Enum.Font.GothamBold
+minBtn.TextSize = 18
+minBtn.Text = "-"
+minBtn.Parent = top
+Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 8)
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(0, 34, 0, 34)
+closeBtn.Position = UDim2.new(1, -40, 0.5, -17)
+closeBtn.BackgroundColor3 = Color3.fromRGB(80, 20, 40)
+closeBtn.TextColor3 = Color3.fromRGB(255, 170, 185)
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 14
+closeBtn.Text = "X"
+closeBtn.Parent = top
+Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 8)
+
+local footer = Instance.new("TextLabel")
+footer.Size = UDim2.new(1, 0, 0, 28)
+footer.Position = UDim2.new(0, 0, 1, -28)
+footer.BackgroundColor3 = Color3.fromRGB(18, 12, 28)
+footer.Font = Enum.Font.GothamBold
+footer.TextSize = 12
+footer.TextColor3 = Color3.fromRGB(168, 85, 247)
+footer.Text = "MADE BY GOJO"
+footer.Parent = panel
+Instance.new("UICorner", footer).CornerRadius = UDim.new(0, 12)
+
+local list = Instance.new("ScrollingFrame")
+list.Size = UDim2.new(1, -16, 1, -82)
+list.Position = UDim2.new(0, 8, 0, 52)
+list.BackgroundTransparency = 1
+list.ScrollBarThickness = 4
+list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+list.CanvasSize = UDim2.new(0, 0, 0, 0)
+list.Parent = panel
+
+local layout = Instance.new("UIListLayout", list)
+layout.Padding = UDim.new(0, 9)
+layout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local dragging, dragInput, dragStart, startPos = false, nil, nil, UDim2.new()
+local function startDrag(inp)
+	if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+		dragging = true
+		dragInput = inp
+		dragStart = inp.Position
+		startPos = panel.Position
+		inp.Changed:Connect(function()
+			if inp.UserInputState == Enum.UserInputState.End then
+				dragging = false
+				dragInput = nil
+			end
+		end)
+	end
+end
+top.InputBegan:Connect(startDrag)
+reopen.InputBegan:Connect(startDrag)
+UserInputService.InputChanged:Connect(function(inp)
+	if dragging and inp == dragInput then
+		local d = inp.Position - dragStart
+		panel.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+	end
+end)
+
+local minimized = false
+minBtn.MouseButton1Click:Connect(function()
+	minimized = not minimized
+	list.Visible = not minimized
+	footer.Visible = not minimized
+	panel.Size = minimized and UDim2.new(0, 336, 0, 46) or UDim2.new(0, 336, 0, 510)
+	minBtn.Text = minimized and "+" or "-"
+end)
+
+closeBtn.MouseButton1Click:Connect(function()
+	panel.Visible = false
+	reopen.Position = panel.Position
+	reopen.Visible = true
+end)
+
+reopen.MouseButton1Click:Connect(function()
+	if not dragging then
+		panel.Visible = true
+		reopen.Visible = false
+	end
+end)
+
+local function makeRow(order, name, initVal, onFlip, numCfg)
+	local row = Instance.new("Frame")
+	row.LayoutOrder = order
+	row.Size = UDim2.new(1, 0, 0, numCfg and 86 or 52)
+	row.BackgroundColor3 = Color3.fromRGB(22, 16, 34)
+	row.Parent = list
+	Instance.new("UICorner", row).CornerRadius = UDim.new(0, 10)
+	local st = Instance.new("UIStroke", row)
+	st.Color = Color3.fromRGB(88, 28, 135)
+	st.Thickness = 1
+
+	local dot = Instance.new("Frame")
+	dot.Size = UDim2.new(0, 12, 0, 12)
+	dot.Position = UDim2.new(0, 12, 0, 14)
+	dot.Parent = row
+	Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.new(1, -110, 0, 26)
+	lbl.Position = UDim2.new(0, 32, 0, 7)
+	lbl.BackgroundTransparency = 1
+	lbl.TextXAlignment = Enum.TextXAlignment.Left
+	lbl.Font = Enum.Font.GothamBold
+	lbl.TextSize = 14
+	lbl.TextColor3 = Color3.fromRGB(243, 232, 255)
+	lbl.Text = name
+	lbl.Parent = row
+
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.new(0, 70, 0, 34)
+	btn.Position = UDim2.new(1, -80, 0, 9)
+	btn.Font = Enum.Font.GothamBlack
+	btn.TextSize = 13
+	btn.Parent = row
+	Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+
+	local active = initVal
+	local function paint()
+		if active then
+			btn.Text = "ON"
+			btn.BackgroundColor3 = Color3.fromRGB(20, 83, 45)
+			btn.TextColor3 = Color3.fromRGB(134, 239, 172)
+			dot.BackgroundColor3 = Color3.fromRGB(34, 197, 94)
+		else
+			btn.Text = "OFF"
+			btn.BackgroundColor3 = Color3.fromRGB(90, 20, 32)
+			btn.TextColor3 = Color3.fromRGB(254, 202, 202)
+			dot.BackgroundColor3 = Color3.fromRGB(239, 68, 68)
+		end
+	end
+	paint()
+
+	btn.MouseButton1Click:Connect(function()
+		active = not active
+		paint()
+		onFlip(active)
+	end)
+
+	if numCfg then
+		local sub = Instance.new("TextLabel")
+		sub.Size = UDim2.new(0.55, -12, 0, 28)
+		sub.Position = UDim2.new(0, 12, 0, 46)
+		sub.BackgroundTransparency = 1
+		sub.TextXAlignment = Enum.TextXAlignment.Left
+		sub.Font = Enum.Font.Gotham
+		sub.TextSize = 12
+		sub.TextColor3 = Color3.fromRGB(196, 181, 253)
+		sub.Text = numCfg.label
+		sub.Parent = row
+
+		local box = Instance.new("TextBox")
+		box.Size = UDim2.new(0.42, -12, 0, 30)
+		box.Position = UDim2.new(0.58, 0, 0, 45)
+		box.BackgroundColor3 = Color3.fromRGB(12, 10, 18)
+		box.TextColor3 = Color3.new(1, 1, 1)
+		box.Font = Enum.Font.GothamBold
+		box.TextSize = 13
+		box.ClearTextOnFocus = false
+		box.Text = tostring(numCfg.default)
+		box.Parent = row
+		Instance.new("UICorner", box).CornerRadius = UDim.new(0, 6)
+
+		box.FocusLost:Connect(function()
+			local n = tonumber(box.Text)
+			if n then
+				numCfg.onSet(n)
+				box.Text = tostring(n)
+			else
+				box.Text = tostring(numCfg.default)
+			end
+		end)
+	end
+end
+
+makeRow(1, "ESP", cfg.esp, function(v) cfg.esp = v; syncESPList() end)
+makeRow(2, "ESP WALL CHECK", cfg.wallCheck, function(v) cfg.wallCheck = v; stepESP() end)
+makeRow(3, "AIMBOT", cfg.aimbot, function(v) cfg.aimbot = v end, {
+	label = "FOV (10-360):",
+	default = cfg.fov,
+	onSet = function(v) cfg.fov = math.clamp(v, 10, 360) end,
+})
+makeRow(4, "SPEED", cfg.speedOn, function(v) cfg.speedOn = v; pushMovement() end, {
+	label = "Speed:",
+	default = cfg.speed,
+	onSet = function(v) cfg.speed = math.clamp(v, 1, 250); if cfg.speedOn then pushMovement() end end,
+})
+makeRow(5, "JUMP", cfg.jumpOn, function(v) cfg.jumpOn = v; pushMovement() end, {
+	label = "Jump:",
+	default = cfg.jump,
+	onSet = function(v) cfg.jump = math.clamp(v, 1, 300); if cfg.jumpOn then pushMovement() end end,
+})
+makeRow(6, "SPIN", cfg.spinOn, function(v) cfg.spinOn = v; pushMovement() end, {
+	label = "Spin Speed:",
+	default = cfg.spin,
+	onSet = function(v) cfg.spin = math.clamp(v, 0, 120); if cfg.spinOn then pushMovement() end end,
+})
+
+RunService.RenderStepped:Connect(function()
+	if cfg.esp then stepESP() end
+	if cfg.aimbot then stepAimbot() end
+end)
+]]
+clientScript.Parent = scriptsFolder
+
+print("FREEMIUM V5 hard-lock aimbot ready.")
